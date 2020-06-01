@@ -53,15 +53,17 @@ public class Town {
     public string name;
 }
 
-public class Building {
-    public Building (OSMObject _w, float _x, float _y) {
+public class Retail {
+    public Retail (OSMObject _w, float _x, float _y, GameObject _obj) {
         w = _w;
         city = w.tags.addrcity;
         street = w.tags.addrstreet;
         x = _x;
         y = _y;
+        o = _obj;
     }
     public OSMObject w;
+    public GameObject o;
     public string city;
     public string street;
     public float x;
@@ -73,8 +75,12 @@ public class FetchOSM : MonoBehaviour {
     public GameObject TownGO;
     float minlat = 41.784968F;
     float minlon = -88.016086F;
-    float maxlat = 41.817183F;
-    float maxlon = -87.859740F;
+    float height = 0.056346F;
+    float width = 0.156346F;
+    /*float minlat = 40.058844F;
+    float minlon = -88.340691F;*/
+    float maxlat;
+    float maxlon;
     float unitlat;
     float unitlon;
     float latToY (float lat) {
@@ -103,6 +109,40 @@ public class FetchOSM : MonoBehaviour {
         return closest;
     }
 
+    List<Retail> removeOutliers (List<Retail> rs) {
+        List<Retail> xordered = (from element in rs orderby element.x select element).ToList ();
+        List<Retail> yordered = (from element in rs orderby element.y select element).ToList ();
+        float xavg = xordered[xordered.Count / 2].x;
+        float yavg = yordered[xordered.Count / 2].y;
+
+        print (String.Format ("\t{0}, {1}", xavg, yavg));
+        /*
+        foreach (Retail r in rs) {
+            xavg += r.x;
+            yavg += r.y;
+        }
+        xavg /= rs.Count;
+        yavg /= rs.Count;*/
+        float variance = 0;
+        foreach (Retail r in rs) {
+            float distSq = (float) (Math.Pow (r.x - xavg, 2) + Math.Pow (r.y - yavg, 2));
+            variance += distSq;
+        }
+        variance /= rs.Count;
+        float stdv = (float) Math.Sqrt (variance);
+        print (String.Format ("\tstdv {0}", stdv));
+        List<Retail> clustered = new List<Retail> ();
+        foreach (Retail r in rs) {
+            float dist = (float) (Math.Pow (r.x - xavg, 2) + Math.Pow (r.y - yavg, 2));
+
+            print (String.Format ("\t\tdist {0}; d-v {1}", dist, dist - variance));
+            if (dist <= 2 * stdv) {
+                clustered.Add (r);
+            }
+        }
+        return clustered;
+    }
+
     Vector2 averageVector (Vector2[] vecs) {
         float x = 0;
         float y = 0;
@@ -117,11 +157,14 @@ public class FetchOSM : MonoBehaviour {
         Dictionary<int, OSMObject> elements;
         Dictionary<int, OSMObject> townElements;
         Dictionary<string, Town> towns = new Dictionary<string, Town> ();
+        Dictionary<string, List<Retail>> retailAreas = new Dictionary<string, List<Retail>> ();
         List<OSMObject> objects;
         List<OSMObject> townObjs;
         //List<Building> houses;
+        maxlat = minlat + height;
+        maxlon = minlon + width;
         unitlat = (maxlat - minlat) / 32;
-        unitlon = (maxlon - minlon) / 32;
+        unitlon = (maxlon - minlon) / (32 * (width/height));
 
         //WebRequest request = WebRequest.Create ("https://overpass-api.de/api/interpreter?data=[out:json];node(41.77,-87.95,41.82,-87.9);out;");
         //HttpWebResponse response = (HttpWebResponse) request.GetResponse ();
@@ -135,7 +178,7 @@ public class FetchOSM : MonoBehaviour {
             OSMelements data = JsonUtility.FromJson<OSMelements> (json);
 
             OSMelements townData = JsonUtility.FromJson<OSMelements> (townJson);
-            print (townQuery);
+            print (query);
             objects = data.elements;
             townObjs = townData.elements;
             elements = data.elements.ToDictionary (x => x.id, x => x);
@@ -294,7 +337,7 @@ public class FetchOSM : MonoBehaviour {
             var triangulator = new Triangulator (vertices2);
             var indices = triangulator.Triangulate ();
             var colors = Enumerable.Range (0, vertices3.Length)
-                .Select (i => UnityEngine.Color.green)
+                .Select (i => (o.tags.landuse == "retail" ? UnityEngine.Color.green : UnityEngine.Color.yellow))
                 .ToArray ();
             var mesh = new Mesh {
                 vertices = vertices3,
@@ -306,11 +349,35 @@ public class FetchOSM : MonoBehaviour {
             var obj = Instantiate (TownGO, new Vector3 (0, 0, 0), Quaternion.identity);
             Vector2 avg = averageVector (vertices2);
             Town t = closestTown (avg.x, avg.y, towns.Values.ToList ());
+            Retail r = new Retail (o, avg.x, avg.y, obj);
+            if (!retailAreas.ContainsKey (t.name)) {
+                retailAreas[t.name] = new List<Retail> ();
+            }
+            retailAreas[t.name].Add (r);
             obj.name = String.Format ("{0}-{1}-{2}", t.name, avg.x, avg.y);
             var meshRenderer = obj.AddComponent<MeshRenderer> ();
             meshRenderer.material = new Material (Shader.Find ("Sprites/Default"));
             var filter = obj.AddComponent<MeshFilter> ();
             filter.mesh = mesh;
+        }
+
+        foreach (Town t in towns.Values.ToList ()) {
+            if (!retailAreas.ContainsKey (t.name)) {
+                continue;
+            }
+
+            print (String.Format ("{0} downtown:", t.name));
+            List<Retail> downtown = removeOutliers (retailAreas[t.name]);
+            print (String.Format ("\t{0} areas", downtown.Count));
+            foreach (Retail r in downtown) {
+                var filter = (MeshFilter) r.o.GetComponent ("MeshFilter");
+                var mesh = filter.mesh;
+                Color[] colors = new Color[mesh.vertices.Length];
+                for (int m = 0; m < colors.Length; m++) {
+                    colors[m] = Color.white;
+                }
+                mesh.colors = colors;
+            }
         }
         print (String.Format ("{0} queries, {1} misses", queries, misses));
         print (String.Format ("{0} objects", objects.Count));
